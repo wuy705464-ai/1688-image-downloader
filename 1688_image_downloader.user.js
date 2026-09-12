@@ -1,13 +1,13 @@
 // ==UserScript==
 // @name         1688商品图片批量下载器
 // @namespace    1688-product-image-downloader
-// @version      0.4.0
+// @version      0.4.1
 // @description  导入1688商品链接，保存主图栏第2至第5张原图链接和商品基本信息；可选同时下载图片
 // @author       Mavis
 // @homepageURL  https://github.com/wuy705464-ai/1688-image-downloader
 // @supportURL   https://github.com/wuy705464-ai/1688-image-downloader/issues
-// @downloadURL  https://raw.githubusercontent.com/wuy705464-ai/1688-image-downloader/main/1688_image_downloader.user.js
-// @updateURL    https://raw.githubusercontent.com/wuy705464-ai/1688-image-downloader/main/1688_image_downloader.user.js
+// @downloadURL  https://github.com/wuy705464-ai/1688-image-downloader/raw/refs/heads/main/1688_image_downloader.user.js
+// @updateURL    https://github.com/wuy705464-ai/1688-image-downloader/raw/refs/heads/main/1688_image_downloader.user.js
 // @match        https://*.1688.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -149,7 +149,8 @@
     }
 
     function saveSettings() {
-        settings.outputMode = ui?.mode?.value === 'download' ? 'download' : 'links';
+        const selected = ui?.mode?.querySelector('input[name="a1688-output-mode"]:checked')?.value;
+        settings.outputMode = selected === 'download' ? 'download' : 'links';
         saveJson(SETTINGS_KEY, settings);
     }
 
@@ -658,6 +659,7 @@
     }
 
     function clearFinished() {
+        if (!confirm('确定清除已经完成的记录吗？清除后，这些尚未导出的图片链接也会被删除。')) return;
         tasks = tasks.filter(task => task.status !== 'done');
         saveTasks();
         render();
@@ -702,18 +704,17 @@
                     <button type="button" id="a1688-current">添加当前商品页</button>
                     <input type="file" id="a1688-file" accept=".txt,.csv,text/plain,text/csv" hidden>
                 </div>
-                <label class="a1688-mode">保存方式
-                    <select id="a1688-mode">
-                        <option value="links">只保存图片链接（推荐）</option>
-                        <option value="download">保存链接并下载图片</option>
-                    </select>
-                </label>
+                <div class="a1688-mode" id="a1688-mode">
+                    <span>保存方式</span>
+                    <label><input type="radio" name="a1688-output-mode" value="links"> 只保存链接</label>
+                    <label><input type="radio" name="a1688-output-mode" value="download"> 链接＋图片</label>
+                </div>
                 <div class="a1688-counts" id="a1688-counts"></div>
                 <div class="a1688-row">
                     <button type="button" class="primary" id="a1688-start">开始采集</button>
                     <button type="button" id="a1688-pause">暂停</button>
                     <button type="button" id="a1688-export">导出商品表</button>
-                    <button type="button" id="a1688-clear">清除完成</button>
+                    <button type="button" id="a1688-clear">清空完成记录</button>
                 </div>
                 <div class="a1688-status" id="a1688-status">等待导入链接。</div>
             </div>`;
@@ -733,11 +734,13 @@
         };
 
         ui.input.value = GM_getValue(INPUT_KEY, '');
-        ui.mode.value = settings.outputMode;
-        ui.mode.addEventListener('change', () => {
+        const currentMode = ui.mode.querySelector(`input[value="${settings.outputMode}"]`);
+        if (currentMode) currentMode.checked = true;
+        ui.mode.addEventListener('change', event => {
+            if (!event.target.matches('input[name="a1688-output-mode"]')) return;
             saveSettings();
             render();
-            setStatus(ui.mode.value === 'download' ? '将保存链接并下载图片。' : '将只保存图片链接，不下载图片。');
+            setStatus(settings.outputMode === 'download' ? '将保存链接并下载图片。' : '将只保存图片链接，不下载图片。');
         });
         ui.input.addEventListener('input', () => GM_setValue(INPUT_KEY, ui.input.value));
         ui.input.addEventListener('dragover', event => event.preventDefault());
@@ -787,8 +790,10 @@
         #a1688-image-panel textarea { width:100%; resize:vertical; padding:9px 10px; border:1px solid #ffd0b3; border-radius:8px;
             outline:none; color:#2e3540; background:#fffdfa; font:12px/1.55 Consolas,monospace; }
         #a1688-image-panel textarea:focus { border-color:#ff6000; box-shadow:0 0 0 3px rgba(255,96,0,.10); }
-        .a1688-mode { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:9px; color:#5c514a; }
-        .a1688-mode select { flex:1; min-width:0; padding:6px 8px; border:1px solid #ffd0b3; border-radius:6px; color:#5b310f; background:#fff; }
+        .a1688-mode { display:flex; align-items:center; flex-wrap:wrap; gap:7px; margin-top:9px; color:#5c514a; }
+        .a1688-mode > span { margin-right:2px; }
+        .a1688-mode label { display:flex; align-items:center; gap:3px; padding:5px 8px; border:1px solid #ffd0b3; border-radius:6px; background:#fffaf6; cursor:pointer; }
+        .a1688-mode input { margin:0; accent-color:#ff6000; }
         .a1688-tip { margin:0 0 8px; color:#6d5d52; font-size:12px; }
         .a1688-row { display:flex; flex-wrap:wrap; gap:7px; margin-top:9px; }
         #a1688-image-panel button { padding:6px 10px; border:1px solid #ff7a29; border-radius:6px; color:#d74d00; background:#fff;
