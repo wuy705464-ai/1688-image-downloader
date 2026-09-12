@@ -16,6 +16,7 @@ PRODUCT_HTML = """<!doctype html>
   <div class="company-name">义乌市测试饰品有限公司</div>
   <div class="offer-gallery">
     <img width="600" height="600" src="https://cbu01.alicdn.com/img/ibank/first.jpg_300x300.jpg">
+    <div class="video-thumb"><img width="600" height="600" src="https://cbu01.alicdn.com/img/ibank/video-cover.jpg"></div>
     <img width="600" height="600" src="https://cbu01.alicdn.com/img/ibank/second.jpg_300x300.jpg">
     <img width="600" height="600" src="https://cbu01.alicdn.com/img/ibank/third.jpg">
     <img width="600" height="600" src="https://cbu01.alicdn.com/img/ibank/fourth.jpg">
@@ -77,6 +78,7 @@ def run_product_test(browser):
     assert saved["moq"] == "2 件起批"
     assert saved["shopName"] == "义乌市测试饰品有限公司"
     assert len(downloads) == 4
+    assert all("video-cover" not in item["url"] for item in downloads)
     assert downloads[0]["url"].endswith("/second.jpg")
     assert downloads[-1]["url"].endswith("/fifth.jpg")
     assert "123456789" in downloads[0]["name"]

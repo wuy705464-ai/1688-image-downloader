@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         1688商品图片批量下载器
 // @namespace    1688-product-image-downloader
-// @version      0.4.1
+// @version      0.4.2
 // @description  导入1688商品链接，保存主图栏第2至第5张原图链接和商品基本信息；可选同时下载图片
 // @author       Mavis
 // @homepageURL  https://github.com/wuy705464-ai/1688-image-downloader
@@ -90,13 +90,22 @@
         }
     }
 
+    function isVideoUrl(value) {
+        try {
+            const url = new URL(normalizeUrl(value));
+            return /\.(?:mp4|webm|mov|m3u8|flv|avi)(?:$|[?#])/i.test(url.href);
+        } catch (_) {
+            return false;
+        }
+    }
+
     function extractUrls(text) {
         const matches = String(text || '').match(/(?:https?:)?\/\/[^\s<>"']+/gi) || [];
         const seen = new Set();
         const urls = [];
         for (const match of matches) {
             const url = canonicalTaskUrl(match);
-            if (!url || seen.has(url)) continue;
+            if (!url || seen.has(url) || isVideoUrl(url)) continue;
             seen.add(url);
             urls.push(url);
         }
@@ -206,11 +215,29 @@
         }
     }
 
+    function isVideoThumbnail(element, url) {
+        if (!element) return false;
+        if (element.closest([
+            'video',
+            '[class*="video"]',
+            '[class*="Video"]',
+            '[data-type="video"]',
+            '[data-media-type="video"]',
+            '[aria-label*="视频"]',
+            '[title*="视频"]'
+        ].join(','))) return true;
+
+        const item = element.closest('li, [class*="thumb"], [class*="item"]');
+        if (item && item.querySelector('video, [class*="play-icon"], [class*="playIcon"], [class*="video-icon"], [class*="videoIcon"]')) return true;
+
+        return /(?:\/video\/|video[-_]?cover|video[-_]?poster|video[-_]?snapshot)/i.test(url || '');
+    }
+
     function collectFromSelectors(selectors, output, seen) {
         for (const selector of selectors) {
             for (const image of document.querySelectorAll(selector)) {
                 const url = imageFromElement(image);
-                if (!url || seen.has(url) || !looksLikeProductImage(url)) continue;
+                if (!url || seen.has(url) || !looksLikeProductImage(url) || isVideoThumbnail(image, url)) continue;
                 seen.add(url);
                 output.push(url);
             }
@@ -244,7 +271,7 @@
         // 最后按截图中的位置特征兜底：页面左上商品画廊区域内的图片。
         if (ordered.length < 2) for (const image of document.images) {
             const url = imageFromElement(image);
-            if (!url || seen.has(url) || !looksLikeProductImage(url)) continue;
+            if (!url || seen.has(url) || !looksLikeProductImage(url) || isVideoThumbnail(image, url)) continue;
             const rect = image.getBoundingClientRect();
             if (rect.bottom < 0 || rect.top > Math.max(950, innerHeight * 1.15)) continue;
             if (rect.left > innerWidth * 0.62 || rect.width < 38 || rect.height < 38) continue;
@@ -684,7 +711,7 @@
         ui.start.textContent = run.active ? '运行中…' : (counts.done || counts.pending ? '开始 / 继续' : '开始采集');
         ui.start.disabled = !!run.active;
         ui.pause.disabled = !run.active;
-        ui.rule.textContent = `只取左侧主图栏：跳过第1张，保存第2～5张链接；任务间随机等待7–10秒。`;
+        ui.rule.textContent = `只取左侧主图栏静态图片：排除视频，跳过第1张图片，保存第2～5张链接；任务间隔7–10秒。`;
         document.getElementById('a1688-retry-count')?.addEventListener('click', retryErrors);
     }
 
