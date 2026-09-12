@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         1688商品图片批量下载器
 // @namespace    1688-product-image-downloader
-// @version      0.3.0
-// @description  导入1688商品链接或直接图片地址；商品页跳过首图后最多下载4张，并导出商品基本信息
+// @version      0.4.0
+// @description  导入1688商品链接，保存主图栏第2至第5张原图链接和商品基本信息；可选同时下载图片
 // @author       Mavis
 // @homepageURL  https://github.com/wuy705464-ai/1688-image-downloader
 // @supportURL   https://github.com/wuy705464-ai/1688-image-downloader/issues
@@ -26,6 +26,7 @@
     const STORAGE_KEY = 'a1688_image_downloader_tasks_v1';
     const RUN_KEY = 'a1688_image_downloader_run_v1';
     const INPUT_KEY = 'a1688_image_downloader_input_v1';
+    const SETTINGS_KEY = 'a1688_image_downloader_settings_v1';
     const MAX_IMAGES_PER_PRODUCT = 4;
     const PAGE_WAIT_MS = 2500;
     const TASK_DELAY_MIN_MS = 7000;
@@ -134,6 +135,8 @@
 
     let tasks = (loadJson(STORAGE_KEY, []) || []).map(normalizeTask).filter(item => item.url);
     let run = loadJson(RUN_KEY, { active: false, returnUrl: '', startedAt: '' }) || {};
+    let settings = loadJson(SETTINGS_KEY, { outputMode: 'links' }) || {};
+    settings.outputMode = settings.outputMode === 'download' ? 'download' : 'links';
     let working = false;
     let ui;
 
@@ -143,6 +146,11 @@
 
     function saveRun() {
         saveJson(RUN_KEY, run);
+    }
+
+    function saveSettings() {
+        settings.outputMode = ui?.mode?.value === 'download' ? 'download' : 'links';
+        saveJson(SETTINGS_KEY, settings);
     }
 
     function normalizeImageUrl(value) {
@@ -173,6 +181,9 @@
             element.getAttribute('data-ks-lazyload'),
             element.getAttribute('data-img')
         ];
+        const background = element.style?.backgroundImage || getComputedStyle(element).backgroundImage || '';
+        const backgroundMatch = background.match(/url\(["']?(.+?)["']?\)/i);
+        if (backgroundMatch) candidates.push(backgroundMatch[1]);
         const srcset = element.getAttribute('srcset') || element.getAttribute('data-srcset') || '';
         if (srcset) {
             const largest = srcset.split(',').map(part => part.trim().split(/\s+/)[0]).filter(Boolean).pop();
@@ -209,34 +220,33 @@
         const ordered = [];
         const seen = new Set();
 
-        // 先按商品主图区域顺序收集，确保“跳过首图”含义稳定。
+        // 优先只读左侧主图缩略图栏，不混入商品详情长图、SKU 图和推荐商品图。
         collectFromSelectors([
-            '[class*="gallery"] img',
+            '[class*="thumbnail"] img',
+            '[class*="thumbnail"] [style*="background-image"]',
+            '[class*="thumb-list"] img',
+            '[class*="thumbList"] img',
+            '[class*="thumb"] img',
             '[class*="image-list"] img',
+            '[class*="imageList"] img'
+        ], ordered, seen);
+
+        // 页面类名变化时，退回到商品画廊容器。
+        if (ordered.length < 2) collectFromSelectors([
+            '[class*="gallery"] img',
             '[class*="main-image"] img',
             '[class*="mainImage"] img',
             '[class*="offer-img"] img',
             '[class*="preview"] img'
         ], ordered, seen);
 
-        collectFromSelectors([
-            '[class*="detail-content"] img',
-            '[class*="detailContent"] img',
-            '[class*="description"] img',
-            '[class*="desc-content"] img',
-            '[data-module-name*="description"] img',
-            '#detailContent img',
-            '.desc-lazyload-container img'
-        ], ordered, seen);
-
-        // 页面改版时的兜底：只接受已显示、尺寸足够大的商品图片。
-        for (const image of document.images) {
+        // 最后按截图中的位置特征兜底：页面左上商品画廊区域内的图片。
+        if (ordered.length < 2) for (const image of document.images) {
             const url = imageFromElement(image);
             if (!url || seen.has(url) || !looksLikeProductImage(url)) continue;
             const rect = image.getBoundingClientRect();
-            const width = image.naturalWidth || rect.width || 0;
-            const height = image.naturalHeight || rect.height || 0;
-            if (width < 280 || height < 280) continue;
+            if (rect.bottom < 0 || rect.top > Math.max(950, innerHeight * 1.15)) continue;
+            if (rect.left > innerWidth * 0.62 || rect.width < 38 || rect.height < 38) continue;
             seen.add(url);
             ordered.push(url);
         }
@@ -448,13 +458,18 @@
         return taskId ? taskId === pageId : canonicalTaskUrl(task.url) === canonicalTaskUrl(location.href);
     }
 
-    async function downloadTaskImages(task, images) {
+    async function saveTaskImages(task, images) {
         task.status = 'downloading';
         task.images = images;
         task.downloaded = 0;
         task.error = '';
         saveTasks();
         render();
+
+        if (settings.outputMode === 'links') {
+            setStatus(`正在保存 ${task.title || productId(task.url) || '商品'} 的图片链接…`);
+            return;
+        }
 
         for (let i = 0; i < images.length; i++) {
             if (!run.active) throw new Error('用户已暂停');
@@ -484,18 +499,19 @@
 
             setStatus('正在加载商品图片…');
             await sleep(PAGE_WAIT_MS);
-            await autoScrollForImages();
             const images = extractProductImages();
             Object.assign(task, extractBasicInfo());
             task.title ||= clean(document.title.replace(/[-_|].*$/, ''));
             if (!images.length) throw new Error('未找到可下载图片；请把这个商品链接发给我适配');
 
-            await downloadTaskImages(task, images);
+            await saveTaskImages(task, images);
             task.status = 'done';
             task.finishedAt = nowIso();
             task.error = '';
             saveTasks();
-            setStatus(`本商品完成：已跳过首图，下载 ${images.length} 张。`, 'success');
+            setStatus(settings.outputMode === 'download'
+                ? `本商品完成：已跳过首图，保存链接并下载 ${images.length} 张。`
+                : `本商品完成：已保存主图栏第2～${images.length + 1}张的链接。`, 'success');
             continueQueue = true;
         } catch (error) {
             if (errorText(error) === '用户已暂停') {
@@ -522,7 +538,7 @@
         working = true;
         try {
             task.title = task.title || '直接图片';
-            await downloadTaskImages(task, [normalizeImageUrl(task.url)]);
+            await saveTaskImages(task, [normalizeImageUrl(task.url)]);
             task.status = 'done';
             task.finishedAt = nowIso();
             saveTasks();
@@ -663,10 +679,10 @@
             else counts.pending++;
         }
         ui.counts.innerHTML = `共 <b>${counts.all}</b> 条 · 待处理 <b>${counts.pending}</b> · 完成 <b>${counts.done}</b> · 失败 <button type="button" id="a1688-retry-count">${counts.error}</button>`;
-        ui.start.textContent = run.active ? '运行中…' : (counts.done || counts.pending ? '开始 / 继续' : '开始下载');
+        ui.start.textContent = run.active ? '运行中…' : (counts.done || counts.pending ? '开始 / 继续' : '开始采集');
         ui.start.disabled = !!run.active;
         ui.pause.disabled = !run.active;
-        ui.rule.textContent = `商品链接：跳过首图，最多下载 ${MAX_IMAGES_PER_PRODUCT} 张；任务间随机等待 7–10 秒；直接图片地址每条下载 1 张。`;
+        ui.rule.textContent = `只取左侧主图栏：跳过第1张，保存第2～5张链接；任务间随机等待7–10秒。`;
         document.getElementById('a1688-retry-count')?.addEventListener('click', retryErrors);
     }
 
@@ -675,7 +691,7 @@
         panel.id = 'a1688-image-panel';
         panel.innerHTML = `
             <div class="a1688-head">
-                <strong>🖼️ 1688 商品图片下载</strong>
+                <strong>🖼️ 1688 商品图片采集</strong>
                 <button type="button" id="a1688-fold">收起</button>
             </div>
             <div id="a1688-body">
@@ -686,9 +702,15 @@
                     <button type="button" id="a1688-current">添加当前商品页</button>
                     <input type="file" id="a1688-file" accept=".txt,.csv,text/plain,text/csv" hidden>
                 </div>
+                <label class="a1688-mode">保存方式
+                    <select id="a1688-mode">
+                        <option value="links">只保存图片链接（推荐）</option>
+                        <option value="download">保存链接并下载图片</option>
+                    </select>
+                </label>
                 <div class="a1688-counts" id="a1688-counts"></div>
                 <div class="a1688-row">
-                    <button type="button" class="primary" id="a1688-start">开始下载</button>
+                    <button type="button" class="primary" id="a1688-start">开始采集</button>
                     <button type="button" id="a1688-pause">暂停</button>
                     <button type="button" id="a1688-export">导出商品表</button>
                     <button type="button" id="a1688-clear">清除完成</button>
@@ -702,6 +724,7 @@
             body: panel.querySelector('#a1688-body'),
             input: panel.querySelector('#a1688-input'),
             file: panel.querySelector('#a1688-file'),
+            mode: panel.querySelector('#a1688-mode'),
             start: panel.querySelector('#a1688-start'),
             pause: panel.querySelector('#a1688-pause'),
             counts: panel.querySelector('#a1688-counts'),
@@ -710,6 +733,12 @@
         };
 
         ui.input.value = GM_getValue(INPUT_KEY, '');
+        ui.mode.value = settings.outputMode;
+        ui.mode.addEventListener('change', () => {
+            saveSettings();
+            render();
+            setStatus(ui.mode.value === 'download' ? '将保存链接并下载图片。' : '将只保存图片链接，不下载图片。');
+        });
         ui.input.addEventListener('input', () => GM_setValue(INPUT_KEY, ui.input.value));
         ui.input.addEventListener('dragover', event => event.preventDefault());
         ui.input.addEventListener('drop', async event => {
@@ -758,6 +787,8 @@
         #a1688-image-panel textarea { width:100%; resize:vertical; padding:9px 10px; border:1px solid #ffd0b3; border-radius:8px;
             outline:none; color:#2e3540; background:#fffdfa; font:12px/1.55 Consolas,monospace; }
         #a1688-image-panel textarea:focus { border-color:#ff6000; box-shadow:0 0 0 3px rgba(255,96,0,.10); }
+        .a1688-mode { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:9px; color:#5c514a; }
+        .a1688-mode select { flex:1; min-width:0; padding:6px 8px; border:1px solid #ffd0b3; border-radius:6px; color:#5b310f; background:#fff; }
         .a1688-tip { margin:0 0 8px; color:#6d5d52; font-size:12px; }
         .a1688-row { display:flex; flex-wrap:wrap; gap:7px; margin-top:9px; }
         #a1688-image-panel button { padding:6px 10px; border:1px solid #ff7a29; border-radius:6px; color:#d74d00; background:#fff;

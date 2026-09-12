@@ -50,6 +50,7 @@ def run_product_test(browser):
     storage = {
         "a1688_image_downloader_tasks_v1": json.dumps([task]),
         "a1688_image_downloader_run_v1": json.dumps({"active": True, "returnUrl": task["url"]}),
+        "a1688_image_downloader_settings_v1": json.dumps({"outputMode": "download"}),
     }
     install_stubs(page, storage)
     page.route("https://detail.1688.com/**", lambda route: route.fulfill(
@@ -95,7 +96,7 @@ def run_product_test(browser):
     context.close()
 
 
-def run_direct_image_test(browser):
+def run_direct_image_link_only_test(browser):
     context = browser.new_context()
     page = context.new_page()
     direct = "https://cbu01.alicdn.com/img/ibank/direct.png"
@@ -107,10 +108,12 @@ def run_direct_image_test(browser):
     page.route("https://www.1688.com/", lambda route: route.fulfill(status=200, content_type="text/html", body="<html><body></body></html>"))
     page.goto("https://www.1688.com/")
     page.add_script_tag(path=str(SCRIPT))
-    page.wait_for_function("window.__downloads.length === 1", timeout=8000)
+    page.wait_for_function("JSON.parse(window.__store['a1688_image_downloader_tasks_v1'])[0].status === 'done'", timeout=8000)
     downloads = page.evaluate("window.__downloads")
-    assert downloads[0]["url"] == direct
-    assert downloads[0]["name"].endswith("图1.png")
+    saved = page.evaluate("JSON.parse(window.__store['a1688_image_downloader_tasks_v1'])[0]")
+    assert downloads == []
+    assert saved["images"] == [direct]
+    assert saved["downloaded"] == 0
     context.close()
 
 
@@ -122,7 +125,7 @@ def main():
         )
         try:
             run_product_test(browser)
-            run_direct_image_test(browser)
+            run_direct_image_link_only_test(browser)
         finally:
             browser.close()
     print("2 end-to-end browser checks passed")
