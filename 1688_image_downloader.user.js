@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         1688商品图片批量下载器
 // @namespace    1688-product-image-downloader
-// @version      0.2.0
+// @version      0.3.0
 // @description  导入1688商品链接或直接图片地址；商品页跳过首图后最多下载4张，并导出商品基本信息
 // @author       Mavis
 // @homepageURL  https://github.com/wuy705464-ai/1688-image-downloader
@@ -28,10 +28,12 @@
     const INPUT_KEY = 'a1688_image_downloader_input_v1';
     const MAX_IMAGES_PER_PRODUCT = 4;
     const PAGE_WAIT_MS = 2500;
-    const NEXT_TASK_DELAY_MS = 1800;
+    const TASK_DELAY_MIN_MS = 7000;
+    const TASK_DELAY_MAX_MS = 10000;
     const DOWNLOAD_GAP_MS = 650;
 
     const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    const randomTaskDelay = () => Math.floor(TASK_DELAY_MIN_MS + Math.random() * (TASK_DELAY_MAX_MS - TASK_DELAY_MIN_MS + 1));
     const clean = value => String(value || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
     const nowIso = () => new Date().toISOString();
     const errorText = error => clean(error && (error.error || error.message) || error).slice(0, 180);
@@ -428,6 +430,17 @@
         return tasks.find(item => ['pending', 'visiting', 'downloading'].includes(item.status));
     }
 
+    async function waitBeforeNextTask() {
+        if (!run.active || !currentPendingTask()) return;
+        let remaining = randomTaskDelay();
+        while (remaining > 0 && run.active) {
+            setStatus(`本条已完成，${Math.ceil(remaining / 1000)} 秒后处理下一条…`, 'success');
+            const step = Math.min(1000, remaining);
+            await sleep(step);
+            remaining -= step;
+        }
+    }
+
     function currentPageMatches(task) {
         if (!task || task.type !== 'product') return false;
         const taskId = productId(task.url);
@@ -499,7 +512,7 @@
             working = false;
         }
         if (continueQueue && run.active) {
-            await sleep(NEXT_TASK_DELAY_MS);
+            await waitBeforeNextTask();
             await processNext();
         }
     }
@@ -522,7 +535,7 @@
         }
         render();
         if (run.active) {
-            await sleep(NEXT_TASK_DELAY_MS);
+            await waitBeforeNextTask();
             await processNext();
         }
     }
@@ -653,7 +666,7 @@
         ui.start.textContent = run.active ? '运行中…' : (counts.done || counts.pending ? '开始 / 继续' : '开始下载');
         ui.start.disabled = !!run.active;
         ui.pause.disabled = !run.active;
-        ui.rule.textContent = `商品链接：跳过首图，最多下载 ${MAX_IMAGES_PER_PRODUCT} 张；直接图片地址：每条下载 1 张。`;
+        ui.rule.textContent = `商品链接：跳过首图，最多下载 ${MAX_IMAGES_PER_PRODUCT} 张；任务间随机等待 7–10 秒；直接图片地址每条下载 1 张。`;
         document.getElementById('a1688-retry-count')?.addEventListener('click', retryErrors);
     }
 
