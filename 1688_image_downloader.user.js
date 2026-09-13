@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         1688商品图片批量下载器
 // @namespace    1688-product-image-downloader
-// @version      0.4.2
-// @description  导入1688商品链接，保存主图栏第2至第5张原图链接和商品基本信息；可选同时下载图片
+// @version      0.6.0
+// @description  按商品ID保存主图栏中除首图外的3张可用JPG链接和商品基本信息；自动排除视频、SVG和小图标
 // @author       Mavis
 // @homepageURL  https://github.com/wuy705464-ai/1688-image-downloader
 // @supportURL   https://github.com/wuy705464-ai/1688-image-downloader/issues
@@ -27,7 +27,8 @@
     const RUN_KEY = 'a1688_image_downloader_run_v1';
     const INPUT_KEY = 'a1688_image_downloader_input_v1';
     const SETTINGS_KEY = 'a1688_image_downloader_settings_v1';
-    const MAX_IMAGES_PER_PRODUCT = 4;
+    const MAX_IMAGES_PER_PRODUCT = 3;
+    const MAX_STORED_TASKS = 3000;
     const PAGE_WAIT_MS = 2500;
     const TASK_DELAY_MIN_MS = 7000;
     const TASK_DELAY_MAX_MS = 10000;
@@ -99,17 +100,31 @@
         }
     }
 
+    function is1688ProductUrl(value) {
+        try {
+            const url = new URL(normalizeUrl(value));
+            return /(?:^|\.)1688\.com$/i.test(url.hostname) && /\/offer\/\d+\.html/i.test(url.pathname);
+        } catch (_) {
+            return false;
+        }
+    }
+
     function extractUrls(text) {
         const matches = String(text || '').match(/(?:https?:)?\/\/[^\s<>"']+/gi) || [];
         const seen = new Set();
         const urls = [];
+        let ignored = 0;
         for (const match of matches) {
             const url = canonicalTaskUrl(match);
-            if (!url || seen.has(url) || isVideoUrl(url)) continue;
+            if (!url || isVideoUrl(url) || (!is1688ProductUrl(url) && !isDirectImageUrl(url))) {
+                ignored++;
+                continue;
+            }
+            if (seen.has(url)) continue;
             seen.add(url);
             urls.push(url);
         }
-        return urls;
+        return { urls, ignored };
     }
 
     function productId(url) {
@@ -125,6 +140,7 @@
         const url = canonicalTaskUrl(source && source.url);
         const type = source && source.type === 'image' || isDirectImageUrl(url) ? 'image' : 'product';
         const allowed = ['pending', 'visiting', 'downloading', 'done', 'error'];
+        const sourceImages = Array.isArray(source && source.images) ? source.images.map(normalizeImageUrl).filter(Boolean) : [];
         return {
             url,
             type,
@@ -134,11 +150,12 @@
             price: clean(source && source.price),
             moq: clean(source && source.moq),
             shopName: clean(source && source.shopName),
-            images: Array.isArray(source && source.images) ? source.images.map(normalizeImageUrl).filter(Boolean) : [],
+            images: sourceImages,
             downloaded: Math.max(0, Number(source && source.downloaded) || 0),
             error: clean(source && source.error),
             createdAt: clean(source && source.createdAt) || nowIso(),
-            finishedAt: clean(source && source.finishedAt)
+            finishedAt: clean(source && source.finishedAt),
+            exportedAt: clean(source && source.exportedAt)
         };
     }
 
@@ -215,17 +232,40 @@
         }
     }
 
+    function isUsableProductJpgUrl(url) {
+        if (!url || /(?:\.svg(?:$|[?#])|data:image\/svg|\.ico(?:$|[?#]))/i.test(url)) return false;
+        try {
+            return /\.jpe?g$/i.test(new URL(normalizeImageUrl(url)).pathname);
+        } catch (_) {
+            return false;
+        }
+    }
+
+    function isTinyPageIcon(element) {
+        if (!element) return false;
+        const rect = element.getBoundingClientRect();
+        const naturalWidth = Number(element.naturalWidth) || 0;
+        const naturalHeight = Number(element.naturalHeight) || 0;
+        const naturalTiny = naturalWidth > 0 && naturalHeight > 0 && naturalWidth <= 32 && naturalHeight <= 32;
+        const renderedTiny = rect.width > 0 && rect.height > 0 && rect.width <= 32 && rect.height <= 32;
+        return renderedTiny || (naturalTiny && rect.width <= 40 && rect.height <= 40);
+    }
+
     function isVideoThumbnail(element, url) {
         if (!element) return false;
-        if (element.closest([
-            'video',
-            '[class*="video"]',
-            '[class*="Video"]',
-            '[data-type="video"]',
-            '[data-media-type="video"]',
-            '[aria-label*="视频"]',
-            '[title*="视频"]'
-        ].join(','))) return true;
+        let node = element;
+        for (let depth = 0; node && depth < 4; depth++, node = node.parentElement) {
+            const marker = [
+                node.className,
+                node.id,
+                node.getAttribute?.('data-type'),
+                node.getAttribute?.('data-media-type'),
+                node.getAttribute?.('aria-label'),
+                node.getAttribute?.('title'),
+                node.getAttribute?.('alt')
+            ].map(clean).join(' ');
+            if (/(?:^|[-_\s])(video|视频)(?:$|[-_\s])/i.test(marker)) return true;
+        }
 
         const item = element.closest('li, [class*="thumb"], [class*="item"]');
         if (item && item.querySelector('video, [class*="play-icon"], [class*="playIcon"], [class*="video-icon"], [class*="videoIcon"]')) return true;
@@ -237,10 +277,47 @@
         for (const selector of selectors) {
             for (const image of document.querySelectorAll(selector)) {
                 const url = imageFromElement(image);
-                if (!url || seen.has(url) || !looksLikeProductImage(url) || isVideoThumbnail(image, url)) continue;
+                if (!url || seen.has(url) || !looksLikeProductImage(url) || !isUsableProductJpgUrl(url)
+                    || isVideoThumbnail(image, url) || isTinyPageIcon(image)) continue;
                 seen.add(url);
                 output.push(url);
             }
+        }
+    }
+
+    function collectGalleryByPosition(output, seen) {
+        const candidates = [...document.images].map((image, domIndex) => {
+            const url = imageFromElement(image);
+            const rect = image.getBoundingClientRect();
+            return { image, url, rect, domIndex };
+        }).filter(item => item.url
+            && looksLikeProductImage(item.url)
+            && isUsableProductJpgUrl(item.url)
+            && !isVideoThumbnail(item.image, item.url)
+            && !isTinyPageIcon(item.image)
+            && item.rect.width >= 38
+            && item.rect.height >= 38
+            && item.rect.bottom > 0
+            && item.rect.top < Math.max(950, innerHeight * 1.15)
+            && item.rect.left < innerWidth * 0.72);
+
+        const hero = candidates
+            .filter(item => item.rect.width >= 300 && item.rect.height >= 300)
+            .sort((a, b) => (b.rect.width * b.rect.height) - (a.rect.width * a.rect.height))[0];
+        if (!hero) return;
+
+        const thumbnails = candidates.filter(item => item !== hero
+            && item.rect.width <= 240
+            && item.rect.height <= 240
+            && item.rect.right <= hero.rect.left + 35
+            && item.rect.bottom >= hero.rect.top - 60
+            && item.rect.top <= hero.rect.bottom + 100)
+            .sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left || a.domIndex - b.domIndex);
+
+        for (const item of thumbnails) {
+            if (seen.has(item.url)) continue;
+            seen.add(item.url);
+            output.push(item.url);
         }
     }
 
@@ -248,8 +325,11 @@
         const ordered = [];
         const seen = new Set();
 
-        // 优先只读左侧主图缩略图栏，不混入商品详情长图、SKU 图和推荐商品图。
-        collectFromSelectors([
+        // 优先按“主图左侧的竖向缩略图栏”识别，避免混入右侧 SKU 小图。
+        collectGalleryByPosition(ordered, seen);
+
+        // 无法取得可靠布局信息时，使用常见主图栏类名。
+        if (ordered.length < 2) collectFromSelectors([
             '[class*="thumbnail"] img',
             '[class*="thumbnail"] [style*="background-image"]',
             '[class*="thumb-list"] img',
@@ -271,7 +351,8 @@
         // 最后按截图中的位置特征兜底：页面左上商品画廊区域内的图片。
         if (ordered.length < 2) for (const image of document.images) {
             const url = imageFromElement(image);
-            if (!url || seen.has(url) || !looksLikeProductImage(url) || isVideoThumbnail(image, url)) continue;
+            if (!url || seen.has(url) || !looksLikeProductImage(url) || !isUsableProductJpgUrl(url)
+                || isVideoThumbnail(image, url) || isTinyPageIcon(image)) continue;
             const rect = image.getBoundingClientRect();
             if (rect.bottom < 0 || rect.top > Math.max(950, innerHeight * 1.15)) continue;
             if (rect.left > innerWidth * 0.62 || rect.width < 38 || rect.height < 38) continue;
@@ -390,22 +471,25 @@
             setStatus('当前没有可导出的记录。', 'error');
             return;
         }
-        const header = ['商品ID', '商品标题', '价格', '起订量', '店铺或公司', '商品链接', '状态', '已下载图片数', '图片2', '图片3', '图片4', '图片5', '错误'];
-        const rows = tasks.map(task => [
-            task.offerId || productId(task.url),
-            task.title,
-            task.price,
-            task.moq,
-            task.shopName,
-            task.url,
-            task.status,
-            task.downloaded,
-            ...(task.type === 'product' ? task.images.slice(0, 4) : [task.images[0] || task.url]),
-            task.error
-        ]);
-        while (rows.some(row => row.length < header.length)) {
-            for (const row of rows) if (row.length < header.length) row.splice(row.length - 1, 0, '');
-        }
+        const header = ['商品ID', '商品标题', '价格', '起订量', '店铺或公司', '商品链接', '图片链接数', '图片2', '图片3', '图片4', '图片5', '状态', '已下载图片数', '错误', '完成时间'];
+        const rows = tasks.map(task => {
+            const images = task.type === 'product' ? task.images.slice(0, 4) : [task.images[0] || task.url];
+            while (images.length < 4) images.push('');
+            return [
+                task.offerId || productId(task.url),
+                task.title,
+                task.price,
+                task.moq,
+                task.shopName,
+                task.url,
+                task.images.length,
+                ...images,
+                task.status,
+                task.downloaded,
+                task.error,
+                task.finishedAt
+            ];
+        });
         const csv = '\uFEFF' + [header, ...rows].map(row => row.slice(0, header.length).map(csvCell).join(',')).join('\r\n');
         const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
         const url = URL.createObjectURL(blob);
@@ -416,6 +500,10 @@
         link.click();
         link.remove();
         setTimeout(() => URL.revokeObjectURL(url), 30000);
+        const exportedAt = nowIso();
+        for (const task of tasks) if (task.status === 'done') task.exportedAt = exportedAt;
+        saveTasks();
+        render();
         setStatus(`已导出 ${tasks.length} 条商品记录。`, 'success');
     }
 
@@ -449,6 +537,16 @@
     function isVerificationPage() {
         if (/(?:punish|captcha|verify|sec-check)/i.test(location.href)) return true;
         return !!document.querySelector('[class*="captcha"], #nc_1_wrapper, .nc-container, iframe[src*="captcha"], iframe[src*="verify"]');
+    }
+
+    function pauseForVerification(task) {
+        run.active = false;
+        saveRun();
+        task.status = 'pending';
+        task.error = '遇到安全验证，完成验证后点击继续';
+        saveTasks();
+        render();
+        setStatus('检测到安全验证。请手动完成后点击“开始 / 继续”。', 'error');
     }
 
     async function autoScrollForImages() {
@@ -516,17 +614,16 @@
         let continueQueue = false;
         try {
             if (isVerificationPage()) {
-                run.active = false;
-                saveRun();
-                task.status = 'pending';
-                task.error = '遇到安全验证，完成验证后点击继续';
-                saveTasks();
-                setStatus('检测到安全验证。请手动完成后点击“继续”。', 'error');
+                pauseForVerification(task);
                 return;
             }
 
             setStatus('正在加载商品图片…');
             await sleep(PAGE_WAIT_MS);
+            if (isVerificationPage()) {
+                pauseForVerification(task);
+                return;
+            }
             const images = extractProductImages();
             Object.assign(task, extractBasicInfo());
             task.title ||= clean(document.title.replace(/[-_|].*$/, ''));
@@ -542,12 +639,13 @@
                 : `本商品完成：已保存主图栏第2～${images.length + 1}张的链接。`, 'success');
             continueQueue = true;
         } catch (error) {
-            if (errorText(error) === '用户已暂停') {
+            const reason = errorText(error);
+            if (reason === '用户已暂停') {
                 task.status = 'pending';
                 task.error = '';
             } else {
                 task.status = 'error';
-                task.error = errorText(error);
+                task.error = reason;
             }
             saveTasks();
             render();
@@ -571,8 +669,9 @@
             task.finishedAt = nowIso();
             saveTasks();
         } catch (error) {
-            task.status = errorText(error) === '用户已暂停' ? 'pending' : 'error';
-            task.error = task.status === 'error' ? errorText(error) : '';
+            const reason = errorText(error);
+            task.status = reason === '用户已暂停' ? 'pending' : 'error';
+            task.error = task.status === 'error' ? reason : '';
             saveTasks();
         } finally {
             working = false;
@@ -623,25 +722,34 @@
     }
 
     function addUrls(text) {
-        const urls = extractUrls(text);
+        const { urls, ignored } = extractUrls(text);
         const keys = new Set(tasks.map(taskKey));
         let added = 0;
+        let overflow = 0;
         for (const url of urls) {
             const task = normalizeTask({ url, type: isDirectImageUrl(url) ? 'image' : 'product' });
             const key = taskKey(task);
             if (keys.has(key)) continue;
+            if (tasks.length >= MAX_STORED_TASKS) {
+                overflow++;
+                continue;
+            }
             keys.add(key);
             tasks.push(task);
             added++;
         }
         saveTasks();
         render();
-        setStatus(urls.length ? `识别 ${urls.length} 条链接，新增 ${added} 条。` : '没有识别到有效链接。', urls.length ? 'success' : 'error');
+        const notes = [`识别 ${urls.length} 条有效链接，新增 ${added} 条`];
+        if (ignored) notes.push(`忽略 ${ignored} 条非商品或视频地址`);
+        if (overflow) notes.push(`超过 ${MAX_STORED_TASKS} 条容量的 ${overflow} 条未加入`);
+        setStatus(urls.length || ignored ? `${notes.join('；')}。` : '没有识别到有效的商品或图片链接。', urls.length ? 'success' : 'error');
         return added;
     }
 
     function startRun() {
         addUrls(ui.input.value);
+        saveSettings();
         for (const task of tasks) {
             if (task.status === 'visiting' || task.status === 'downloading') task.status = 'pending';
         }
@@ -650,10 +758,12 @@
             setStatus(tasks.length ? '没有待处理任务。可点击失败数量后重试，或清空后重新导入。' : '请先粘贴或导入链接。', 'error');
             return;
         }
+        const pendingTask = currentPendingTask();
+        const keepReturnUrl = pendingTask && currentPageMatches(pendingTask) && clean(run.returnUrl);
         run = {
             active: true,
-            returnUrl: run.returnUrl || location.href,
-            startedAt: run.startedAt || nowIso()
+            returnUrl: keepReturnUrl ? run.returnUrl : location.href,
+            startedAt: nowIso()
         };
         saveTasks();
         saveRun();
@@ -686,11 +796,21 @@
     }
 
     function clearFinished() {
-        if (!confirm('确定清除已经完成的记录吗？清除后，这些尚未导出的图片链接也会被删除。')) return;
-        tasks = tasks.filter(task => task.status !== 'done');
+        const unexported = tasks.filter(task => task.status === 'done' && !task.exportedAt).length;
+        if (unexported) {
+            setStatus(`还有 ${unexported} 条完成记录尚未导出。请先导出商品表，脚本不会删除这些链接。`, 'error');
+            return;
+        }
+        const removable = tasks.filter(task => task.status === 'done' && task.exportedAt).length;
+        if (!removable) {
+            setStatus('当前没有已经导出的完成记录。');
+            return;
+        }
+        if (!confirm(`确定清除 ${removable} 条已经导出的完成记录吗？`)) return;
+        tasks = tasks.filter(task => !(task.status === 'done' && task.exportedAt));
         saveTasks();
         render();
-        setStatus('已清除完成记录。');
+        setStatus(`已清除 ${removable} 条已导出的完成记录。`);
     }
 
     function setStatus(text, type = '') {
@@ -711,7 +831,7 @@
         ui.start.textContent = run.active ? '运行中…' : (counts.done || counts.pending ? '开始 / 继续' : '开始采集');
         ui.start.disabled = !!run.active;
         ui.pause.disabled = !run.active;
-        ui.rule.textContent = `只取左侧主图栏静态图片：排除视频，跳过第1张图片，保存第2～5张链接；任务间隔7–10秒。`;
+        ui.rule.textContent = `按商品ID保存：排除视频、SVG和24×24图标，跳过首图，保留3张可用JPG；任务间隔7–10秒。`;
         document.getElementById('a1688-retry-count')?.addEventListener('click', retryErrors);
     }
 
@@ -741,7 +861,7 @@
                     <button type="button" class="primary" id="a1688-start">开始采集</button>
                     <button type="button" id="a1688-pause">暂停</button>
                     <button type="button" id="a1688-export">导出商品表</button>
-                    <button type="button" id="a1688-clear">清空完成记录</button>
+                    <button type="button" id="a1688-clear">清空已导出记录</button>
                 </div>
                 <div class="a1688-status" id="a1688-status">等待导入链接。</div>
             </div>`;
