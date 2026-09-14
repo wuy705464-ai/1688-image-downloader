@@ -92,15 +92,15 @@ def run_product_test(browser):
     assert saved["price"] == "¥ 8.80 - 12.50"
     assert saved["moq"] == "2 件起批"
     assert saved["shopName"] == "义乌市测试饰品有限公司"
-    assert len(downloads) == 3
+    assert len(downloads) == 4
     assert all("video-cover" not in item["url"] for item in downloads)
     assert all(".svg" not in item["url"] for item in downloads)
     assert all("sku.jpg" not in item["url"] and "detail.jpg" not in item["url"] for item in downloads)
     assert downloads[0]["url"].endswith("/second.jpg")
-    assert downloads[-1]["url"].endswith("/fourth.jpg")
+    assert downloads[-1]["url"].endswith("/fifth.jpg")
     assert "123456789" in downloads[0]["name"]
     assert downloads[0]["name"].endswith("图2.jpg")
-    assert downloads[-1]["name"].endswith("图4.jpg")
+    assert downloads[-1]["name"].endswith("图5.jpg")
     page.evaluate("""() => {
       window.__exportBlob = null;
       URL.createObjectURL = blob => { window.__exportBlob = blob; return 'blob:test'; };

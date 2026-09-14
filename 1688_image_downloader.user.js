@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         1688商品图片批量下载器
 // @namespace    1688-product-image-downloader
-// @version      0.6.0
-// @description  按商品ID保存主图栏中除首图外的3张可用JPG链接和商品基本信息；自动排除视频、SVG和小图标
+// @version      0.6.1
+// @description  按商品ID保存主图栏中除首图外的4张可用JPG链接和商品基本信息；自动排除视频、SVG和小图标
 // @author       Mavis
 // @homepageURL  https://github.com/wuy705464-ai/1688-image-downloader
 // @supportURL   https://github.com/wuy705464-ai/1688-image-downloader/issues
@@ -27,7 +27,7 @@
     const RUN_KEY = 'a1688_image_downloader_run_v1';
     const INPUT_KEY = 'a1688_image_downloader_input_v1';
     const SETTINGS_KEY = 'a1688_image_downloader_settings_v1';
-    const MAX_IMAGES_PER_PRODUCT = 3;
+    const MAX_IMAGES_PER_PRODUCT = 4;
     const MAX_STORED_TASKS = 3000;
     const PAGE_WAIT_MS = 2500;
     const TASK_DELAY_MIN_MS = 7000;
@@ -831,7 +831,7 @@
         ui.start.textContent = run.active ? '运行中…' : (counts.done || counts.pending ? '开始 / 继续' : '开始采集');
         ui.start.disabled = !!run.active;
         ui.pause.disabled = !run.active;
-        ui.rule.textContent = `按商品ID保存：排除视频、SVG和24×24图标，跳过首图，保留3张可用JPG；任务间隔7–10秒。`;
+        ui.rule.textContent = `按商品ID保存：排除视频、SVG和24×24图标，跳过首图，最多保留4张可用JPG；任务间隔7–10秒。`;
         document.getElementById('a1688-retry-count')?.addEventListener('click', retryErrors);
     }
 
